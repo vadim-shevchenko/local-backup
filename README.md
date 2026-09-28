@@ -49,6 +49,17 @@ Options can be combined, for example `./local-backup.sh --dry-run --delete` to p
 
 The script checks whether `DEVICE` is already mounted. If it is, that mountpoint is used and left mounted when the script exits. Otherwise, the script mounts the device at `DEFAULT_MOUNTPOINT` and attempts to unmount it after the sync.
 
+When it needs to mount the drive, the script reads the sudo password from `.mnt-pwd` in the same directory as `local-backup.sh`. Create that file, put the password on its first line, and restrict access to the current user:
+
+```bash
+touch .mnt-pwd
+chmod 600 .mnt-pwd
+```
+
+The file must be owned by the user running the script and have exactly `600` permissions. It is excluded from Git. Storing a sudo password in plaintext is a security risk; a narrowly scoped `sudoers` rule is preferable where practical.
+
+If `.mnt-pwd` does not exist, the script prompts for the password without echoing it, but only when an interactive terminal is available. Scheduled cron runs cannot prompt and therefore require `.mnt-pwd` when mounting the drive.
+
 The destination is `<mountpoint>/backup/private/`. In dry-run mode the script does not create that directory. If it does not already exist, `rsync` may list the source contents as items it would copy. Dry-run prevents `rsync` from changing files, but the script may still mount and unmount the drive.
 
 ## Logging

@@ -1,6 +1,7 @@
 #!/bin/bash
 
 LANG=en_IL.UTF-8
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
 # === Configuration ===
 DEVICE="/dev/sdb1"
@@ -13,6 +14,56 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 RED='\033[0;31m'
 NC='\033[0m'
+
+load_sudo_password() {
+    local password_file="$SCRIPT_DIR/.mnt-pwd"
+    local owner_and_mode
+
+    if [[ ! -e "$password_file" ]]; then
+        if ! exec 3<>/dev/tty 2>/dev/null; then
+            echo "No $password_file found and no interactive terminal is available for a password prompt." >&2
+            return 1
+        fi
+
+        printf 'Enter sudo password: ' >&3
+        if ! IFS= read -r -s -u 3 SUDO_PASSWORD; then
+            printf '\n' >&3
+            exec 3>&-
+            echo "Could not read sudo password from terminal." >&2
+            return 1
+        fi
+        printf '\n' >&3
+        exec 3>&-
+
+        if [[ -z "$SUDO_PASSWORD" ]]; then
+            echo "Sudo password cannot be empty." >&2
+            return 1
+        fi
+        return 0
+    fi
+
+    if [[ ! -f "$password_file" || ! -r "$password_file" ]]; then
+        echo "Unreadable sudo password file: $password_file" >&2
+        return 1
+    fi
+
+    owner_and_mode=$(stat -c '%u:%a' "$password_file")
+    if [[ "$owner_and_mode" != "$(id -u):600" ]]; then
+        echo "Set $password_file ownership to the current user and permissions to 600." >&2
+        return 1
+    fi
+
+    IFS= read -r SUDO_PASSWORD < "$password_file" || true
+    if [[ -z "$SUDO_PASSWORD" ]]; then
+        echo "Sudo password file is empty: $password_file" >&2
+        return 1
+    fi
+    return 0
+}
+
+run_sudo() {
+    printf '%s\n' "$SUDO_PASSWORD" | sudo -S -p '' "$@"
+}
 
 # === Default options ===
 DRY_RUN=false
@@ -68,10 +119,14 @@ else
     echo "Drive $DEVICE is not mounted."
     echo "Mounting to default location: $MOUNTPOINT ..."
 
-    # Create mountpoint if it doesn't exist
-    sudo mkdir -p "$MOUNTPOINT"
+    if ! load_sudo_password; then
+        exit 1
+    fi
 
-    if sudo mount -t ntfs-3g -o defaults,uid=$(id -u),gid=$(id -g),umask=022 "$DEVICE" "$MOUNTPOINT"; then
+    # Create mountpoint if it doesn't exist
+    run_sudo mkdir -p "$MOUNTPOINT"
+
+    if run_sudo mount -t ntfs-3g -o defaults,uid=$(id -u),gid=$(id -g),umask=022 "$DEVICE" "$MOUNTPOINT"; then
         echo -e "${GREEN}Successfully mounted at $MOUNTPOINT${NC}"
         WE_MOUNTED=true
     else
@@ -117,7 +172,7 @@ fi
 if [ "$WE_MOUNTED" = true ]; then
     echo
     echo "Unmounting $MOUNTPOINT (because this script mounted it) ..."
-    if sudo umount "$MOUNTPOINT"; then
+    if run_sudo umount "$MOUNTPOINT"; then
         echo -e "${GREEN}Successfully unmounted${NC}"
     else
         echo -e "${RED}Failed to unmount. Please check manually.${NC}"
