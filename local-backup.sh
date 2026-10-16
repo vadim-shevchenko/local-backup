@@ -4,8 +4,13 @@ LANG=en_IL.UTF-8
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
 # === Configuration ===
-DEVICE="/dev/sdb1"
-DEFAULT_MOUNTPOINT="/mnt/sdb1"          # Used only when we need to mount it
+# Device names (sda/sdb) are assigned in kernel probe order, which is not
+# stable across boots: the system and backup disks have swapped names, making
+# `findmnt /dev/sdb1` resolve to the system ESP (/boot/efi). Key off the
+# filesystem UUID instead so the right disk is found on every boot.
+# Override with BACKUP_DEVICE / BACKUP_MOUNTPOINT (used by the tests).
+DEVICE="${BACKUP_DEVICE:-/dev/disk/by-uuid/A41EBEB31EBE7E3C}"
+DEFAULT_MOUNTPOINT="${BACKUP_MOUNTPOINT:-/mnt/sdb1}"   # Used only when we need to mount it
 SOURCE="$HOME/Documents/private/"
 LOGFILE="$HOME/rsync-backup.log"
 
@@ -106,11 +111,30 @@ echo "=== Starting backup script ==="
 echo "Time: $(date)"
 echo
 
-# 1. Check if the device is already mounted (find real mountpoint)
+# 1. Make sure the backup disk is actually connected (the by-uuid symlink
+#    only exists while the disk is present)
+if [ ! -e "$DEVICE" ]; then
+    echo -e "${RED}Backup disk not found: $DEVICE (is the disk connected?)${NC}"
+    exit 1
+fi
+
+# 2. Check if the device is already mounted (find real mountpoint)
 EXISTING_MOUNT=$(findmnt -n -o TARGET "$DEVICE" 2>/dev/null)
 
 if [ -n "$EXISTING_MOUNT" ]; then
     MOUNTPOINT="$EXISTING_MOUNT"
+
+    # Never write into a mount that isn't the NTFS backup disk, no matter
+    # what the device lookup returned.
+    MOUNT_FSTYPE=$(findmnt -n -o FSTYPE -T "$MOUNTPOINT" 2>/dev/null)
+    case "$MOUNT_FSTYPE" in
+        ntfs|ntfs3|fuseblk) ;;
+        *)
+            echo -e "${RED}Refusing: $MOUNTPOINT holds '$MOUNT_FSTYPE' - not the NTFS backup disk.${NC}"
+            exit 1
+            ;;
+    esac
+
     echo -e "${GREEN}Drive $DEVICE is already mounted at: $MOUNTPOINT${NC}"
     echo "Using existing mountpoint (will NOT unmount at the end)"
     WE_MOUNTED=false
@@ -138,12 +162,20 @@ fi
 # Destination path (based on the actual mountpoint we found/used)
 DEST="$MOUNTPOINT/backup/private/"
 
-# 2. Create destination directory (skip in dry-run)
+# 3. Create destination directory and verify we can write to it (skip in
+#    dry-run, where nothing is created)
 if [ "$DRY_RUN" = false ]; then
-    mkdir -p "$DEST"
+    if ! mkdir -p "$DEST"; then
+        echo -e "${RED}Cannot create destination: $DEST${NC}"
+        exit 1
+    fi
+    if [ ! -w "$DEST" ]; then
+        echo -e "${RED}Destination is not writable: $DEST${NC}"
+        exit 1
+    fi
 fi
 
-# 3. Run rsync
+# 4. Run rsync
 echo
 echo "Starting rsync from:"
 echo "  Source: $SOURCE"
@@ -168,7 +200,7 @@ else
     echo -e "${RED}Rsync finished with errors (exit code $RSYNC_EXIT)${NC}"
 fi
 
-# 4. Unmount only if this script mounted the drive
+# 5. Unmount only if this script mounted the drive
 if [ "$WE_MOUNTED" = true ]; then
     echo
     echo "Unmounting $MOUNTPOINT (because this script mounted it) ..."
